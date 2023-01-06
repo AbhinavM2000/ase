@@ -4,41 +4,24 @@ from ase.optimize.optimize import Dynamics
 from ase.optimize.fire import FIRE
 from ase.units import kB
 from ase.parallel import world
-from ase.io.trajectory import Trajectory
+from ase.io.trajectory import PickleTrajectory
 
 
 class BasinHopping(Dynamics):
-    """Basin hopping algorithm.
-
-    After Wales and Doye, J. Phys. Chem. A, vol 101 (1997) 5111-5116
-
-    and
-
-    David J. Wales and Harold A. Scheraga, Science, Vol. 285, 1368 (1999)
-    """
+    """Basin hopping algorythm.
+    After Wales and Doye, J. Phys. Chem. A, vol 101 (1997) 5111-5116"""
 
     def __init__(self, atoms,
                  temperature=100 * kB,
                  optimizer=FIRE,
                  fmax=0.1,
                  dr=0.1,
-                 logfile='-',
+                 logfile='-', 
                  trajectory='lowest.traj',
                  optimizer_logfile='-',
                  local_minima_trajectory='local_minima.traj',
                  adjust_cm=True):
-        """Parameters:
-
-        atoms: Atoms object
-            The Atoms object to operate on.
-
-        trajectory: string
-            Pickle file used to store trajectory of atomic movement.
-
-        logfile: file object or str
-            If *logfile* is a string, a file with that name will be opened.
-            Use '-' for stdout.
-        """
+        Dynamics.__init__(self, atoms, logfile, trajectory)
         self.kT = temperature
         self.optimizer = optimizer
         self.fmax = fmax
@@ -51,20 +34,10 @@ class BasinHopping(Dynamics):
         self.optimizer_logfile = optimizer_logfile
         self.lm_trajectory = local_minima_trajectory
         if isinstance(local_minima_trajectory, str):
-            self.lm_trajectory = self.closelater(
-                Trajectory(local_minima_trajectory, 'w', atoms))
+            self.lm_trajectory = PickleTrajectory(local_minima_trajectory,
+                                                  'w', atoms)
 
-        Dynamics.__init__(self, atoms, logfile, trajectory)
         self.initialize()
-
-    def todict(self):
-        d = {'type': 'optimization',
-             'optimizer': self.__class__.__name__,
-             'local-minima-optimizer': self.optimizer.__name__,
-             'temperature': self.kT,
-             'max-force': self.fmax,
-             'maximal-step-width': self.dr}
-        return d
 
     def initialize(self):
         self.positions = 0.0 * self.atoms.get_positions()
@@ -73,15 +46,15 @@ class BasinHopping(Dynamics):
         self.positions = self.atoms.get_positions()
         self.call_observers()
         self.log(-1, self.Emin, self.Emin)
-
+                
     def run(self, steps):
         """Hop the basins for defined number of steps."""
 
         ro = self.positions
         Eo = self.get_energy(ro)
-
+        En = None
+ 
         for step in range(steps):
-            En = None
             while En is None:
                 rn = self.move(ro)
                 En = self.get_energy(rn)
@@ -91,11 +64,12 @@ class BasinHopping(Dynamics):
                 self.Emin = En
                 self.rmin = self.atoms.get_positions()
                 self.call_observers()
+                rn = self.rmin
             self.log(step, En, self.Emin)
 
             accept = np.exp((Eo - En) / self.kT) > np.random.uniform()
             if accept:
-                ro = rn.copy()
+                ro = rn
                 Eo = En
 
     def log(self, step, En, Emin):
@@ -119,7 +93,21 @@ class BasinHopping(Dynamics):
         rn = atoms.get_positions()
         world.broadcast(rn, 0)
         atoms.set_positions(rn)
-        return atoms.get_positions()
+        #find distances between all atoms
+        dist = atoms.get_all_distances(mic=True)
+        #find the largest distance between two atoms
+        maxdist = np.max(dist)
+        #find the smallest distance between two atoms
+        mindist = np.min(dist[np.nonzero(dist)])
+        #find the difference between the largest and smallest distance
+        diff = maxdist - mindist
+        #return return atoms.get_positions() only if the difference is greater than 0.1, otherwise try again
+        if diff > 5.08 & diff < 6.72:
+            return atoms.get_positions()
+        else:
+            return self.move(ro)
+
+        
 
     def get_minimum(self):
         """Return minimal energy and configuration."""
@@ -132,13 +120,18 @@ class BasinHopping(Dynamics):
         if np.sometrue(self.positions != positions):
             self.positions = positions
             self.atoms.set_positions(positions)
-
-            with self.optimizer(self.atoms,
-                                logfile=self.optimizer_logfile) as opt:
+ 
+            try:
+                opt = self.optimizer(self.atoms, logfile=self.optimizer_logfile)
                 opt.run(fmax=self.fmax)
-            if self.lm_trajectory is not None:
-                self.lm_trajectory.write(self.atoms)
+                if self.lm_trajectory is not None:
+                    self.lm_trajectory.write(self.atoms)
 
-            self.energy = self.atoms.get_potential_energy()
-
+                self.energy = self.atoms.get_potential_energy()
+            except:
+                # Something went wrong.
+                # In GPAW the atoms are probably to near to each other.
+                return None
+            
         return self.energy
+       
